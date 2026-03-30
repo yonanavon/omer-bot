@@ -43,7 +43,7 @@ export async function usePrismaAuthState() {
                 data[id] =
                   proto.Message.AppStateSyncKeyData.fromObject(
                     value
-                  ) as SignalDataTypeMap[T];
+                  ) as unknown as SignalDataTypeMap[T];
               } else {
                 data[id] = value;
               }
