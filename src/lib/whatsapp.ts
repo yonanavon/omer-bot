@@ -105,7 +105,11 @@ class WhatsAppService extends EventEmitter {
       socket.ev.on("group-participants.update", async (event) => {
         await this.handleParticipantUpdate({
           id: event.id,
-          participants: event.participants.map((p) => p.id),
+          participants: event.participants.map((p) => ({
+            id: p.id,
+            phoneNumber: p.phoneNumber,
+            lid: p.lid,
+          })),
           action: event.action,
         });
       });
@@ -163,14 +167,17 @@ class WhatsAppService extends EventEmitter {
 
       let newCount = 0;
       for (const participant of participants) {
-        const phoneNumber = participant.id.replace("@s.whatsapp.net", "");
+        const pn = participant.phoneNumber?.replace("@s.whatsapp.net", "");
+        const phoneNumber = pn || participant.id.replace(/@.*$/, "");
+        const lid = participant.id.includes("@lid") ? participant.id : (participant.lid || null);
         try {
           await prisma.communityMember.upsert({
             where: { jid: participant.id },
-            update: { active: true, communityId: community.jid },
+            update: { active: true, communityId: community.jid, phoneNumber, lid },
             create: {
               jid: participant.id,
               phoneNumber,
+              lid,
               communityId: community.jid,
               joinedAt: new Date(),
             },
@@ -194,7 +201,7 @@ class WhatsAppService extends EventEmitter {
 
   private async handleParticipantUpdate(event: {
     id: string;
-    participants: string[];
+    participants: { id: string; phoneNumber?: string; lid?: string }[];
     action: string;
   }) {
     const community = this.monitoredCommunities.get(event.id);
@@ -205,17 +212,21 @@ class WhatsAppService extends EventEmitter {
       event.participants
     );
 
-    for (const participantJid of event.participants) {
-      const phoneNumber = participantJid.replace("@s.whatsapp.net", "");
+    for (const participant of event.participants) {
+      const participantJid = participant.id;
+      const pn = participant.phoneNumber?.replace("@s.whatsapp.net", "");
+      const phoneNumber = pn || participantJid.replace(/@.*$/, "");
+      const lid = participantJid.includes("@lid") ? participantJid : (participant.lid || null);
 
       if (event.action === "add") {
         try {
           await prisma.communityMember.upsert({
             where: { jid: participantJid },
-            update: { active: true, communityId: community.jid },
+            update: { active: true, communityId: community.jid, phoneNumber, lid },
             create: {
               jid: participantJid,
               phoneNumber,
+              lid,
               communityId: community.jid,
               joinedAt: new Date(),
             },

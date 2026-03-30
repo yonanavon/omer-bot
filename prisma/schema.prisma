@@ -20,6 +20,7 @@ model CommunityMember {
   id          Int      @id @default(autoincrement())
   phoneNumber String
   jid         String   @unique
+  lid         String?
   communityId String
   joinedAt    DateTime @default(now())
   active      Boolean  @default(true)

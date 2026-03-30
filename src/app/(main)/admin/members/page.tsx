@@ -63,22 +63,10 @@ export default function MembersPage() {
     fetchCommunities();
   }, [fetchMembers, fetchCommunities]);
 
-  // Listen for real-time updates
+  // Poll for updates
   useEffect(() => {
-    const eventSource = new EventSource("/api/whatsapp/sse");
-
-    eventSource.addEventListener("members-updated", () => {
-      fetchMembers();
-    });
-
-    eventSource.addEventListener("member-joined", (e) => {
-      const data = JSON.parse(e.data);
-      setNewMemberFlash(data.phoneNumber);
-      setTimeout(() => setNewMemberFlash(null), 3000);
-      fetchMembers();
-    });
-
-    return () => eventSource.close();
+    const interval = setInterval(fetchMembers, 5000);
+    return () => clearInterval(interval);
   }, [fetchMembers]);
 
   const filteredMembers = members.filter((m) =>
