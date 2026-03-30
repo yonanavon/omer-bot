@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Wifi, WifiOff, Loader2, QrCode } from "lucide-react";
+import { Wifi, WifiOff, Loader2, QrCode, Users } from "lucide-react";
 
 type Status = "disconnected" | "connecting" | "qr" | "connected";
+
+interface Community {
+  jid: string;
+  name: string;
+  announceGroupJid: string | null;
+}
 
 const statusConfig: Record<
   Status,
@@ -35,6 +41,7 @@ export default function WhatsAppPage() {
   const [status, setStatus] = useState<Status>("disconnected");
   const [qr, setQr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [communities, setCommunities] = useState<Community[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -63,6 +70,26 @@ export default function WhatsAppPage() {
       clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    if (status !== "connected") {
+      setCommunities([]);
+      return;
+    }
+
+    const fetchCommunities = async () => {
+      try {
+        const res = await fetch("/api/whatsapp/communities");
+        if (res.ok) setCommunities(await res.json());
+      } catch {
+        // ignore
+      }
+    };
+
+    fetchCommunities();
+    const interval = setInterval(fetchCommunities, 10000);
+    return () => clearInterval(interval);
+  }, [status]);
 
   const handleConnect = useCallback(async () => {
     setLoading(true);
@@ -148,15 +175,48 @@ export default function WhatsAppPage() {
         </div>
       )}
 
-      {/* Connected Info */}
+      {/* Connected Info & Communities */}
       {status === "connected" && (
-        <div className="rounded-xl border border-green-500/20 bg-green-500/5 p-6">
-          <p className="text-[var(--success)] font-medium">
-            הבוט מחובר ומאזין להצטרפויות חדשות לקהילות!
-          </p>
-          <p className="text-[var(--muted-foreground)] text-sm mt-2">
-            עבור לעמוד &quot;חברי קהילה&quot; כדי לראות את הרשימה
-          </p>
+        <div className="space-y-4">
+          <div className="rounded-xl border border-green-500/20 bg-green-500/5 p-6">
+            <p className="text-[var(--success)] font-medium">
+              הבוט מחובר ומאזין להצטרפויות חדשות לקהילות!
+            </p>
+            <p className="text-[var(--muted-foreground)] text-sm mt-2">
+              עבור לעמוד &quot;חברי קהילה&quot; כדי לראות את הרשימה
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-6">
+            <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+              <Users size={20} />
+              קהילות מנוטרות
+            </h3>
+            {communities.length === 0 ? (
+              <p className="text-[var(--muted-foreground)] text-sm">
+                לא נמצאו קהילות. ודא שהחשבון המחובר הוא מנהל של קהילה.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {communities.map((community) => (
+                  <div
+                    key={community.jid}
+                    className="flex items-center gap-3 p-3 rounded-lg bg-[var(--muted)]/50 border border-[var(--border)]"
+                  >
+                    <div className="p-2 rounded-lg bg-blue-500/10">
+                      <Users size={18} className="text-blue-400" />
+                    </div>
+                    <div>
+                      <p className="font-medium">{community.name}</p>
+                      <p className="text-xs text-[var(--muted-foreground)]">
+                        {community.jid.replace("@g.us", "")}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
