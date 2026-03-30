@@ -1,11 +1,5 @@
 import type { Metadata } from "next";
-import { Noto_Sans_Hebrew } from "next/font/google";
 import "./globals.css";
-
-const font = Noto_Sans_Hebrew({
-  subsets: ["hebrew", "latin"],
-  weight: ["300", "400", "500", "600", "700"],
-});
 
 export const metadata: Metadata = {
   title: "עומר בוט",
@@ -19,7 +13,15 @@ export default function RootLayout({
 }) {
   return (
     <html lang="he" dir="rtl">
-      <body className={`${font.className} antialiased`}>{children}</body>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Noto+Sans+Hebrew:wght@300;400;500;600;700&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body className="font-sans antialiased">{children}</body>
     </html>
   );
 }

@@ -119,8 +119,8 @@ class WhatsAppService extends EventEmitter {
       this.monitoredCommunities.clear();
 
       for (const [jid, metadata] of Object.entries(groups)) {
-        if ((metadata as Record<string, unknown>).isCommunityAnnounce) {
-          const parentJid = (metadata as Record<string, unknown>).linkedParent as string | undefined;
+        if ((metadata as unknown as Record<string, unknown>).isCommunityAnnounce) {
+          const parentJid = (metadata as unknown as Record<string, unknown>).linkedParent as string | undefined;
           if (parentJid) {
             this.monitoredCommunities.set(jid, {
               jid: parentJid,
