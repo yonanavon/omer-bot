@@ -103,7 +103,11 @@ class WhatsAppService extends EventEmitter {
 
       // Listen for participant changes in community announcement groups
       socket.ev.on("group-participants.update", async (event) => {
-        await this.handleParticipantUpdate(event);
+        await this.handleParticipantUpdate({
+          id: event.id,
+          participants: event.participants.map((p) => p.id),
+          action: event.action,
+        });
       });
     } catch (err) {
       console.error("[WhatsApp] Connection error:", err);
@@ -190,7 +194,7 @@ class WhatsAppService extends EventEmitter {
 
   private async handleParticipantUpdate(event: {
     id: string;
-    participants: { id: string }[];
+    participants: string[];
     action: string;
   }) {
     const community = this.monitoredCommunities.get(event.id);
@@ -201,8 +205,7 @@ class WhatsAppService extends EventEmitter {
       event.participants
     );
 
-    for (const participant of event.participants) {
-      const participantJid = participant.id;
+    for (const participantJid of event.participants) {
       const phoneNumber = participantJid.replace("@s.whatsapp.net", "");
 
       if (event.action === "add") {
@@ -290,7 +293,7 @@ class WhatsAppService extends EventEmitter {
   }
 }
 
-// Singleton
+// Singleton - must persist across requests in all environments
 const globalForWhatsApp = globalThis as unknown as {
   whatsapp: WhatsAppService | undefined;
 };
@@ -298,5 +301,4 @@ const globalForWhatsApp = globalThis as unknown as {
 export const whatsapp =
   globalForWhatsApp.whatsapp ?? new WhatsAppService();
 
-if (process.env.NODE_ENV !== "production")
-  globalForWhatsApp.whatsapp = whatsapp;
+globalForWhatsApp.whatsapp = whatsapp;
