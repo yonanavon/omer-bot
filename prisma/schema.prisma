@@ -1,0 +1,29 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model WhatsappSession {
+  key       String   @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("whatsapp_sessions")
+}
+
+model CommunityMember {
+  id          Int      @id @default(autoincrement())
+  phoneNumber String
+  jid         String   @unique
+  communityId String
+  joinedAt    DateTime @default(now())
+  active      Boolean  @default(true)
+
+  @@index([communityId])
+  @@map("community_members")
+}
