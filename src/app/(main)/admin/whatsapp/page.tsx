@@ -37,20 +37,31 @@ export default function WhatsAppPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const eventSource = new EventSource("/api/whatsapp/sse");
+    let active = true;
 
-    eventSource.addEventListener("status", (e) => {
-      const data = JSON.parse(e.data);
-      setStatus(data.status);
-      if (data.status !== "qr") setQr(null);
-    });
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/whatsapp/status");
+        if (!res.ok || !active) return;
+        const data = await res.json();
+        setStatus(data.status);
+        if (data.status === "qr" && data.qr) {
+          setQr(data.qr);
+        } else {
+          setQr(null);
+        }
+      } catch {
+        // ignore fetch errors
+      }
+    };
 
-    eventSource.addEventListener("qr", (e) => {
-      const data = JSON.parse(e.data);
-      setQr(data.qr);
-    });
+    poll();
+    const interval = setInterval(poll, 2000);
 
-    return () => eventSource.close();
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const handleConnect = useCallback(async () => {
