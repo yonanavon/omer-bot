@@ -190,7 +190,7 @@ class WhatsAppService extends EventEmitter {
 
   private async handleParticipantUpdate(event: {
     id: string;
-    participants: string[];
+    participants: { id: string }[];
     action: string;
   }) {
     const community = this.monitoredCommunities.get(event.id);
@@ -201,7 +201,8 @@ class WhatsAppService extends EventEmitter {
       event.participants
     );
 
-    for (const participantJid of event.participants) {
+    for (const participant of event.participants) {
+      const participantJid = participant.id;
       const phoneNumber = participantJid.replace("@s.whatsapp.net", "");
 
       if (event.action === "add") {
