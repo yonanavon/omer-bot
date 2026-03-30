@@ -7,8 +7,8 @@ async function writeData(key: string, data: unknown) {
   const serialized = JSON.stringify(data, BufferJSON.replacer);
   await prisma.whatsappSession.upsert({
     where: { key },
-    update: { value: serialized as unknown as Record<string, unknown> },
-    create: { key, value: serialized as unknown as Record<string, unknown> },
+    update: { value: serialized },
+    create: { key, value: serialized },
   });
 }
 
