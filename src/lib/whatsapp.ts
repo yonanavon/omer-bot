@@ -174,47 +174,46 @@ class WhatsAppService extends EventEmitter {
   }
 
   /**
-   * Batch resolve LID JIDs to phone numbers using USync query.
-   * Sends LIDs as user JIDs and asks for device+contact protocol -
-   * the server responds with the real PN JID for each user.
+   * Batch resolve LID JIDs to phone numbers.
+   * Uses USync with device+LID protocols - same method Baileys uses
+   * internally when sending messages. Each user is sent with both
+   * withId (as jid attr) and withLid (for LID protocol element).
    */
   private async batchResolveLIDs(lids: string[]): Promise<Map<string, string>> {
     const result = new Map<string, string>();
     if (!this.socket || lids.length === 0) return result;
 
-    // Process in chunks of 50 to avoid overwhelming the server
     const chunkSize = 50;
     for (let i = 0; i < lids.length; i += chunkSize) {
       const chunk = lids.slice(i, i + chunkSize);
       try {
         const query = new USyncQuery()
-          .withContactProtocol()
+          .withDeviceProtocol()
+          .withLIDProtocol()
           .withContext("interactive");
         for (const lid of chunk) {
-          query.withUser(new USyncUser().withId(lid));
+          // Set both id (for jid attr) and lid (for LID protocol user element)
+          query.withUser(new USyncUser().withId(lid).withLid(lid));
         }
 
         const response = await this.socket.executeUSyncQuery(query);
 
         if (response?.list) {
-          // Debug: log first few results to understand server response
+          // Debug: log first few results
           if (i === 0) {
             console.log(
-              "[WhatsApp] USync response sample:",
+              "[WhatsApp] USync device+LID response sample:",
               JSON.stringify(response.list.slice(0, 3))
             );
           }
 
-          for (const item of response.list) {
-            // The server may return the real PN JID as the `id` field
-            if (item.id && !isLidUser(item.id)) {
+          for (let j = 0; j < response.list.length; j++) {
+            const item = response.list[j];
+            // The response id might be the PN JID if server resolves LID
+            if (item.id && !isLidUser(item.id) && item.id !== "undefined") {
               const phone = item.id.replace(/@.*$/, "");
-              if (/^\d+$/.test(phone)) {
-                // Find original LID by position
-                const idx = response.list.indexOf(item);
-                if (idx < chunk.length) {
-                  result.set(chunk[idx], phone);
-                }
+              if (/^\d+$/.test(phone) && j < chunk.length) {
+                result.set(chunk[j], phone);
               }
             }
           }
@@ -224,7 +223,7 @@ class WhatsAppService extends EventEmitter {
       }
     }
 
-    console.log(`[WhatsApp] USync resolved ${result.size}/${lids.length} LIDs to phone numbers`);
+    console.log(`[WhatsApp] Resolved ${result.size}/${lids.length} LIDs to phone numbers`);
     return result;
   }
 
