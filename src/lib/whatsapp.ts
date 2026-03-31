@@ -3,8 +3,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   isLidUser,
-  USyncQuery,
-  USyncUser,
+  getBinaryNodeChildren,
+  getBinaryNodeChild,
 } from "baileys";
 import { Boom } from "@hapi/boom";
 import { EventEmitter } from "events";
@@ -174,56 +174,52 @@ class WhatsAppService extends EventEmitter {
   }
 
   /**
-   * Batch resolve LID JIDs to phone numbers.
-   * Uses USync with device+LID protocols - same method Baileys uses
-   * internally when sending messages. Each user is sent with both
-   * withId (as jid attr) and withLid (for LID protocol element).
+   * Fetch raw group participant data to extract phone_number attributes
+   * that Baileys' groupMetadata parser ignores.
    */
-  private async batchResolveLIDs(lids: string[]): Promise<Map<string, string>> {
+  private async fetchRawParticipantPhones(groupJid: string): Promise<Map<string, string>> {
     const result = new Map<string, string>();
-    if (!this.socket || lids.length === 0) return result;
+    if (!this.socket) return result;
 
-    const chunkSize = 50;
-    for (let i = 0; i < lids.length; i += chunkSize) {
-      const chunk = lids.slice(i, i + chunkSize);
-      try {
-        const query = new USyncQuery()
-          .withDeviceProtocol()
-          .withLIDProtocol()
-          .withContext("interactive");
-        for (const lid of chunk) {
-          // Set both id (for jid attr) and lid (for LID protocol user element)
-          query.withUser(new USyncUser().withId(lid).withLid(lid));
+    try {
+      // Send raw IQ query - same as groupMetadata but we parse the raw response
+      const rawResult = await (this.socket as unknown as { query: (node: unknown) => Promise<unknown> }).query({
+        tag: "iq",
+        attrs: {
+          type: "get",
+          xmlns: "w:g2",
+          to: groupJid,
+        },
+        content: [{ tag: "query", attrs: { request: "interactive" } }],
+      });
+
+      const groupNode = getBinaryNodeChild(rawResult as Parameters<typeof getBinaryNodeChild>[0], "group");
+      if (!groupNode) return result;
+
+      const participants = getBinaryNodeChildren(groupNode, "participant");
+
+      // Debug: log first 3 raw participant attrs
+      console.log(
+        "[WhatsApp] Raw participant attrs sample:",
+        participants.slice(0, 3).map((p) => JSON.stringify(p.attrs))
+      );
+
+      for (const p of participants) {
+        const attrs = p.attrs as Record<string, string>;
+        const jid = attrs.jid;
+        const phoneNumber = attrs.phone_number;
+
+        if (jid && phoneNumber && /^\d+@/.test(phoneNumber)) {
+          result.set(jid, phoneNumber.replace(/@.*$/, ""));
+        } else if (jid && phoneNumber && /^\d+$/.test(phoneNumber)) {
+          result.set(jid, phoneNumber);
         }
-
-        const response = await this.socket.executeUSyncQuery(query);
-
-        if (response?.list) {
-          // Debug: log first few results
-          if (i === 0) {
-            console.log(
-              "[WhatsApp] USync device+LID response sample:",
-              JSON.stringify(response.list.slice(0, 3))
-            );
-          }
-
-          for (let j = 0; j < response.list.length; j++) {
-            const item = response.list[j];
-            // The response id might be the PN JID if server resolves LID
-            if (item.id && !isLidUser(item.id) && item.id !== "undefined") {
-              const phone = item.id.replace(/@.*$/, "");
-              if (/^\d+$/.test(phone) && j < chunk.length) {
-                result.set(chunk[j], phone);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error("[WhatsApp] USync batch resolve error:", err);
       }
+    } catch (err) {
+      console.error("[WhatsApp] Raw participant fetch error:", err);
     }
 
-    console.log(`[WhatsApp] Resolved ${result.size}/${lids.length} LIDs to phone numbers`);
+    console.log(`[WhatsApp] Raw query resolved ${result.size} phone numbers`);
     return result;
   }
 
@@ -237,16 +233,8 @@ class WhatsAppService extends EventEmitter {
       const metadata = await this.socket.groupMetadata(announceJid);
       const participants = metadata.participants || [];
 
-      // Collect LIDs that need resolution
-      const lidsToResolve: string[] = [];
-      for (const p of participants) {
-        if (!this.extractPhone(p.id, p.phoneNumber) && isLidUser(p.id)) {
-          lidsToResolve.push(p.id);
-        }
-      }
-
-      // Batch resolve all LIDs via USync
-      const lidToPhone = await this.batchResolveLIDs(lidsToResolve);
+      // Fetch raw participant data to get phone_number attrs
+      const lidToPhone = await this.fetchRawParticipantPhones(announceJid);
 
       let newCount = 0;
       let unresolvedCount = 0;
@@ -310,12 +298,8 @@ class WhatsAppService extends EventEmitter {
     for (const participant of event.participants) {
       const participantJid = participant.id;
       const lid = isLidUser(participantJid) ? participantJid : (participant.lid || null);
-      let phoneNumber = this.extractPhone(participantJid, participant.phoneNumber);
-      if (!phoneNumber && isLidUser(participantJid)) {
-        const resolved = await this.batchResolveLIDs([participantJid]);
-        phoneNumber = resolved.get(participantJid) || null;
-      }
-      phoneNumber = phoneNumber || participantJid.replace(/@.*$/, "");
+      const phoneNumber = this.extractPhone(participantJid, participant.phoneNumber)
+        || participantJid.replace(/@.*$/, "");
 
       if (event.action === "add") {
         try {
