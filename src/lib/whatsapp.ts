@@ -202,6 +202,34 @@ class WhatsAppService extends EventEmitter {
       const metadata = await this.socket.groupMetadata(announceJid);
       const participants = metadata.participants || [];
 
+      // Debug: log first 3 participants to see what the server actually returns
+      console.log(
+        `[WhatsApp] Sample participants from ${community.name}:`,
+        participants.slice(0, 3).map((p) => ({
+          id: p.id,
+          phoneNumber: p.phoneNumber,
+          lid: p.lid,
+        }))
+      );
+
+      // Store LID-PN mappings that groupMetadata gave us (Baileys has a TODO for this)
+      const mappings: { lid: string; pn: string }[] = [];
+      for (const p of participants) {
+        if (isLidUser(p.id) && p.phoneNumber) {
+          mappings.push({ lid: p.id, pn: p.phoneNumber });
+        } else if (!isLidUser(p.id) && p.lid) {
+          mappings.push({ lid: p.lid, pn: p.id });
+        }
+      }
+      if (mappings.length > 0) {
+        try {
+          await this.socket.signalRepository.lidMapping.storeLIDPNMappings(mappings);
+          console.log(`[WhatsApp] Stored ${mappings.length} LID-PN mappings from group metadata`);
+        } catch (err) {
+          console.error("[WhatsApp] Error storing LID mappings:", err);
+        }
+      }
+
       let newCount = 0;
       let unresolvedCount = 0;
       for (const participant of participants) {
