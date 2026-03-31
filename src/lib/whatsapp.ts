@@ -2,8 +2,7 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  USyncQuery,
-  USyncUser,
+  isLidUser,
 } from "baileys";
 import { Boom } from "@hapi/boom";
 import { EventEmitter } from "events";
@@ -158,60 +157,38 @@ class WhatsAppService extends EventEmitter {
   }
 
   /**
-   * Resolve LID JIDs to real phone numbers using USync query.
-   * Returns a map of LID -> phone number.
+   * Resolve a participant to a real phone number.
+   * Priority: 1) phoneNumber field from groupMetadata  2) PN JID  3) LID mapping via signalRepository
    */
-  private async resolveLIDsToPhones(lids: string[]): Promise<Map<string, string>> {
-    const result = new Map<string, string>();
-    if (!this.socket || lids.length === 0) return result;
-
-    try {
-      const query = new USyncQuery().withContactProtocol().withContext("interactive");
-      for (const lid of lids) {
-        query.withUser(new USyncUser().withId(lid));
-      }
-
-      const response = await this.socket.executeUSyncQuery(query);
-      if (response?.list) {
-        for (const item of response.list) {
-          // item.id is the JID returned by WhatsApp (could be the real phone JID)
-          // If the returned ID is a phone number JID (not LID), extract the number
-          if (item.id && !item.id.includes("@lid")) {
-            const phone = item.id.replace(/@.*$/, "");
-            // Find which LID this corresponds to - match by position or by the query
-            if (phone && /^\d+$/.test(phone)) {
-              // We need to find the original LID for this result
-              // USync returns results in same order as users
-              result.set(lids[response.list.indexOf(item)], phone);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      console.error("[WhatsApp] Error resolving LIDs to phone numbers:", err);
-    }
-
-    return result;
-  }
-
-  /**
-   * Extract phone number from a participant, handling LID cases.
-   * Returns the phone number string or null if it's a LID that needs resolution.
-   */
-  private extractPhoneNumber(
+  private async resolvePhoneNumber(
     participantId: string,
     phoneNumber?: string
-  ): string | null {
-    // If Baileys provided a phone number directly, use it
-    const pn = phoneNumber?.replace("@s.whatsapp.net", "");
-    if (pn && /^\d+$/.test(pn)) return pn;
-
-    // If the ID is a regular phone JID, extract the number
-    if (!participantId.includes("@lid")) {
-      return participantId.replace(/@.*$/, "");
+  ): Promise<string | null> {
+    // 1. Baileys already extracted the phone number from the server response
+    if (phoneNumber) {
+      const pn = phoneNumber.replace(/@.*$/, "");
+      if (/^\d+$/.test(pn)) return pn;
     }
 
-    // It's a LID without a phone number - needs resolution
+    // 2. The JID itself is a phone number (not a LID)
+    if (!isLidUser(participantId)) {
+      const num = participantId.replace(/@.*$/, "");
+      if (/^\d+$/.test(num)) return num;
+    }
+
+    // 3. LID -> use Baileys built-in LID mapping store
+    if (this.socket && isLidUser(participantId)) {
+      try {
+        const pnJid = await this.socket.signalRepository.lidMapping.getPNForLID(participantId);
+        if (pnJid) {
+          const num = pnJid.replace(/:.*$/, "").replace(/@.*$/, "");
+          if (/^\d+$/.test(num)) return num;
+        }
+      } catch (err) {
+        console.error(`[WhatsApp] LID mapping lookup failed for ${participantId}:`, err);
+      }
+    }
+
     return null;
   }
 
@@ -225,47 +202,26 @@ class WhatsAppService extends EventEmitter {
       const metadata = await this.socket.groupMetadata(announceJid);
       const participants = metadata.participants || [];
 
-      // Collect LID participants that need phone number resolution
-      const lidParticipants: string[] = [];
-      for (const participant of participants) {
-        const phone = this.extractPhoneNumber(participant.id, participant.phoneNumber);
-        if (phone === null) {
-          lidParticipants.push(participant.id);
-        }
-      }
-
-      // Batch resolve LIDs to phone numbers
-      const lidToPhone = await this.resolveLIDsToPhones(lidParticipants);
-
       let newCount = 0;
+      let unresolvedCount = 0;
       for (const participant of participants) {
-        const isLid = participant.id.includes("@lid");
-        let phoneNumber = this.extractPhoneNumber(participant.id, participant.phoneNumber);
-
-        // Try resolved LID mapping
-        if (phoneNumber === null && isLid) {
-          phoneNumber = lidToPhone.get(participant.id) || null;
-        }
-
-        const lid = isLid ? participant.id : (participant.lid || null);
+        const lid = isLidUser(participant.id) ? participant.id : (participant.lid || null);
         const jid = participant.id;
 
-        // If we still don't have a phone number, store the LID number as fallback
-        // but mark it so we can identify it later
-        if (phoneNumber === null) {
-          phoneNumber = participant.id.replace(/@.*$/, "");
-          console.log(
-            `[WhatsApp] Could not resolve phone for LID participant: ${participant.id}`
-          );
+        const phoneNumber = await this.resolvePhoneNumber(participant.id, participant.phoneNumber);
+
+        if (!phoneNumber) {
+          unresolvedCount++;
+          console.log(`[WhatsApp] Could not resolve phone for: ${participant.id}`);
         }
 
         try {
           await prisma.communityMember.upsert({
             where: { jid },
-            update: { active: true, communityId: community.jid, phoneNumber, lid },
+            update: { active: true, communityId: community.jid, ...(phoneNumber && { phoneNumber }), lid },
             create: {
               jid,
-              phoneNumber,
+              phoneNumber: phoneNumber || participant.id.replace(/@.*$/, ""),
               lid,
               communityId: community.jid,
               joinedAt: new Date(),
@@ -277,11 +233,9 @@ class WhatsAppService extends EventEmitter {
         }
       }
       console.log(
-        `[WhatsApp] Synced ${newCount} members from community: ${community.name}`
+        `[WhatsApp] Synced ${newCount} members from community: ${community.name}` +
+        (unresolvedCount > 0 ? ` (${unresolvedCount} unresolved LIDs)` : "")
       );
-
-      // Also try to fix existing members that have LID-based phone numbers
-      await this.fixLIDPhoneNumbers();
 
       this.emit("members-updated");
     } catch (err) {
@@ -289,59 +243,6 @@ class WhatsAppService extends EventEmitter {
         `[WhatsApp] Error syncing community ${community.name}:`,
         err
       );
-    }
-  }
-
-  /**
-   * Find members whose phoneNumber looks like a LID (not a real phone number)
-   * and try to resolve them.
-   */
-  private async fixLIDPhoneNumbers() {
-    if (!this.socket) return;
-
-    try {
-      // Find members with LID-based JIDs that might have wrong phone numbers
-      const lidMembers = await prisma.communityMember.findMany({
-        where: {
-          jid: { endsWith: "@lid" },
-          active: true,
-        },
-      });
-
-      if (lidMembers.length === 0) return;
-
-      const lidsToResolve = lidMembers
-        .filter((m) => {
-          // Check if the phone number looks like a LID number (not a real phone)
-          // Real Israeli numbers start with 972, real numbers are typically 10-15 digits
-          // LID numbers are internal IDs that don't follow phone patterns
-          return !m.phoneNumber.startsWith("972") && !m.phoneNumber.startsWith("+");
-        })
-        .map((m) => m.jid);
-
-      if (lidsToResolve.length === 0) return;
-
-      console.log(
-        `[WhatsApp] Attempting to resolve ${lidsToResolve.length} LID phone numbers...`
-      );
-
-      const lidToPhone = await this.resolveLIDsToPhones(lidsToResolve);
-
-      for (const [lid, phone] of lidToPhone) {
-        await prisma.communityMember.updateMany({
-          where: { jid: lid },
-          data: { phoneNumber: phone },
-        });
-        console.log(`[WhatsApp] Fixed phone number for LID ${lid}: ${phone}`);
-      }
-
-      if (lidToPhone.size > 0) {
-        console.log(
-          `[WhatsApp] Fixed ${lidToPhone.size} LID phone numbers`
-        );
-      }
-    } catch (err) {
-      console.error("[WhatsApp] Error fixing LID phone numbers:", err);
     }
   }
 
@@ -360,21 +261,9 @@ class WhatsAppService extends EventEmitter {
 
     for (const participant of event.participants) {
       const participantJid = participant.id;
-      const isLid = participantJid.includes("@lid");
-      let phoneNumber = this.extractPhoneNumber(participantJid, participant.phoneNumber);
-
-      // Try to resolve LID to phone number
-      if (phoneNumber === null && isLid) {
-        const resolved = await this.resolveLIDsToPhones([participantJid]);
-        phoneNumber = resolved.get(participantJid) || null;
-      }
-
-      // Fallback: use the raw JID number if we still couldn't resolve
-      if (phoneNumber === null) {
-        phoneNumber = participantJid.replace(/@.*$/, "");
-      }
-
-      const lid = isLid ? participantJid : (participant.lid || null);
+      const lid = isLidUser(participantJid) ? participantJid : (participant.lid || null);
+      const phoneNumber = await this.resolvePhoneNumber(participantJid, participant.phoneNumber)
+        || participantJid.replace(/@.*$/, "");
 
       if (event.action === "add") {
         try {
