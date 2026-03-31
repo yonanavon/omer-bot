@@ -3,6 +3,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   isLidUser,
+  USyncQuery,
+  USyncUser,
 } from "baileys";
 import { Boom } from "@hapi/boom";
 import { EventEmitter } from "events";
@@ -157,39 +159,73 @@ class WhatsAppService extends EventEmitter {
   }
 
   /**
-   * Resolve a participant to a real phone number.
-   * Priority: 1) phoneNumber field from groupMetadata  2) PN JID  3) LID mapping via signalRepository
+   * Extract phone number from a JID or phoneNumber field.
    */
-  private async resolvePhoneNumber(
-    participantId: string,
-    phoneNumber?: string
-  ): Promise<string | null> {
-    // 1. Baileys already extracted the phone number from the server response
+  private extractPhone(jid: string, phoneNumber?: string): string | null {
     if (phoneNumber) {
       const pn = phoneNumber.replace(/@.*$/, "");
       if (/^\d+$/.test(pn)) return pn;
     }
-
-    // 2. The JID itself is a phone number (not a LID)
-    if (!isLidUser(participantId)) {
-      const num = participantId.replace(/@.*$/, "");
+    if (!isLidUser(jid)) {
+      const num = jid.replace(/@.*$/, "");
       if (/^\d+$/.test(num)) return num;
     }
+    return null;
+  }
 
-    // 3. LID -> use Baileys built-in LID mapping store
-    if (this.socket && isLidUser(participantId)) {
+  /**
+   * Batch resolve LID JIDs to phone numbers using USync query.
+   * Sends LIDs as user JIDs and asks for device+contact protocol -
+   * the server responds with the real PN JID for each user.
+   */
+  private async batchResolveLIDs(lids: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    if (!this.socket || lids.length === 0) return result;
+
+    // Process in chunks of 50 to avoid overwhelming the server
+    const chunkSize = 50;
+    for (let i = 0; i < lids.length; i += chunkSize) {
+      const chunk = lids.slice(i, i + chunkSize);
       try {
-        const pnJid = await this.socket.signalRepository.lidMapping.getPNForLID(participantId);
-        if (pnJid) {
-          const num = pnJid.replace(/:.*$/, "").replace(/@.*$/, "");
-          if (/^\d+$/.test(num)) return num;
+        const query = new USyncQuery()
+          .withContactProtocol()
+          .withContext("interactive");
+        for (const lid of chunk) {
+          query.withUser(new USyncUser().withId(lid));
+        }
+
+        const response = await this.socket.executeUSyncQuery(query);
+
+        if (response?.list) {
+          // Debug: log first few results to understand server response
+          if (i === 0) {
+            console.log(
+              "[WhatsApp] USync response sample:",
+              JSON.stringify(response.list.slice(0, 3))
+            );
+          }
+
+          for (const item of response.list) {
+            // The server may return the real PN JID as the `id` field
+            if (item.id && !isLidUser(item.id)) {
+              const phone = item.id.replace(/@.*$/, "");
+              if (/^\d+$/.test(phone)) {
+                // Find original LID by position
+                const idx = response.list.indexOf(item);
+                if (idx < chunk.length) {
+                  result.set(chunk[idx], phone);
+                }
+              }
+            }
+          }
         }
       } catch (err) {
-        console.error(`[WhatsApp] LID mapping lookup failed for ${participantId}:`, err);
+        console.error("[WhatsApp] USync batch resolve error:", err);
       }
     }
 
-    return null;
+    console.log(`[WhatsApp] USync resolved ${result.size}/${lids.length} LIDs to phone numbers`);
+    return result;
   }
 
   private async syncCommunityMembers(
@@ -202,33 +238,16 @@ class WhatsAppService extends EventEmitter {
       const metadata = await this.socket.groupMetadata(announceJid);
       const participants = metadata.participants || [];
 
-      // Debug: log first 3 participants to see what the server actually returns
-      console.log(
-        `[WhatsApp] Sample participants from ${community.name}:`,
-        participants.slice(0, 3).map((p) => ({
-          id: p.id,
-          phoneNumber: p.phoneNumber,
-          lid: p.lid,
-        }))
-      );
-
-      // Store LID-PN mappings that groupMetadata gave us (Baileys has a TODO for this)
-      const mappings: { lid: string; pn: string }[] = [];
+      // Collect LIDs that need resolution
+      const lidsToResolve: string[] = [];
       for (const p of participants) {
-        if (isLidUser(p.id) && p.phoneNumber) {
-          mappings.push({ lid: p.id, pn: p.phoneNumber });
-        } else if (!isLidUser(p.id) && p.lid) {
-          mappings.push({ lid: p.lid, pn: p.id });
+        if (!this.extractPhone(p.id, p.phoneNumber) && isLidUser(p.id)) {
+          lidsToResolve.push(p.id);
         }
       }
-      if (mappings.length > 0) {
-        try {
-          await this.socket.signalRepository.lidMapping.storeLIDPNMappings(mappings);
-          console.log(`[WhatsApp] Stored ${mappings.length} LID-PN mappings from group metadata`);
-        } catch (err) {
-          console.error("[WhatsApp] Error storing LID mappings:", err);
-        }
-      }
+
+      // Batch resolve all LIDs via USync
+      const lidToPhone = await this.batchResolveLIDs(lidsToResolve);
 
       let newCount = 0;
       let unresolvedCount = 0;
@@ -236,11 +255,13 @@ class WhatsAppService extends EventEmitter {
         const lid = isLidUser(participant.id) ? participant.id : (participant.lid || null);
         const jid = participant.id;
 
-        const phoneNumber = await this.resolvePhoneNumber(participant.id, participant.phoneNumber);
+        let phoneNumber = this.extractPhone(participant.id, participant.phoneNumber);
+        if (!phoneNumber && isLidUser(participant.id)) {
+          phoneNumber = lidToPhone.get(participant.id) || null;
+        }
 
         if (!phoneNumber) {
           unresolvedCount++;
-          console.log(`[WhatsApp] Could not resolve phone for: ${participant.id}`);
         }
 
         try {
@@ -290,8 +311,12 @@ class WhatsAppService extends EventEmitter {
     for (const participant of event.participants) {
       const participantJid = participant.id;
       const lid = isLidUser(participantJid) ? participantJid : (participant.lid || null);
-      const phoneNumber = await this.resolvePhoneNumber(participantJid, participant.phoneNumber)
-        || participantJid.replace(/@.*$/, "");
+      let phoneNumber = this.extractPhone(participantJid, participant.phoneNumber);
+      if (!phoneNumber && isLidUser(participantJid)) {
+        const resolved = await this.batchResolveLIDs([participantJid]);
+        phoneNumber = resolved.get(participantJid) || null;
+      }
+      phoneNumber = phoneNumber || participantJid.replace(/@.*$/, "");
 
       if (event.action === "add") {
         try {
